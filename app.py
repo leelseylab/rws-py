@@ -19,14 +19,14 @@ def configure_logging(verbose):
     logging.basicConfig(level=log_level, format='%(message)s')
 
 # Custom log handler
-def event_log(route, method, query_value=None, body=None, log_only_in_cli=False, client_address=""):
+def log_request(route, method, query_value=None, body=None, log_only_in_cli=False, client_address=""):
     timestamp = datetime.now().strftime("%H:%M:%S %d-%m-%Y")
     # Determine route display based on verbose and whether it's root
     if route == "/":
         route_name = "" if not verbose else f"{client_address}/"
     else:
         route_name = route.lstrip("/") if not verbose else f"{client_address}/{route.lstrip('/')}"
-
+    
     log_entry = f"[+] {timestamp} ({method}) {route_name}"
 
     if query_value:
@@ -34,9 +34,8 @@ def event_log(route, method, query_value=None, body=None, log_only_in_cli=False,
     if body:
         log_entry += f"\n{body}"
 
-    # CLI logging format, only log if verbose mode is on or not only for CLI
-    if verbose or not log_only_in_cli:
-        logging.info(log_entry)
+    # CLI logging format
+    logging.info(log_entry)
 
     # /logs logging format, exclude favicon and /logs itself from logs
     if not log_only_in_cli and route not in ["/favicon.ico", "/logs"]:
@@ -44,7 +43,7 @@ def event_log(route, method, query_value=None, body=None, log_only_in_cli=False,
         logs.append(log_entry_web)
 
 # Function to parse target URL and send HTTP request
-def forward_param(query, target):
+def send_request_to_target(query, target):
     if not target.startswith("http://") and not target.startswith("https://"):
         target = "http://" + target
     try:
@@ -54,7 +53,7 @@ def forward_param(query, target):
         path = target_parsed.path or "/"
         path += "?" + target_parsed.query if target_parsed.query else ""
         payload = json.dumps({"query": query}, separators=(",", ":"))
-
+        
         conn.request("POST", path, body=payload, headers={"Content-Type": "application/json"})
         response = conn.getresponse()
         response_text = response.read().decode("utf-8")
@@ -64,7 +63,7 @@ def forward_param(query, target):
         return f"Failed to request {target}: {e}"
 
 # HTML template for log display
-def logs_html():
+def generate_logs_html():
     return f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -110,25 +109,23 @@ class RequestHandler(BaseHTTPRequestHandler):
         parsed_path = urlparse(self.path)
         client_address = f"{self.client_address[0]}:{self.server.server_port}" if verbose else ""
 
-        if parsed_path.path in ["/favicon.ico", "/logs"]:
-            # Ensure that logs for /favicon.ico and /logs are generated in verbose mode only
-            event_log(parsed_path.path, self.command, log_only_in_cli=True, client_address=client_address)
-            if parsed_path.path == "/favicon.ico":
-                self.send_response(404)
-                self.end_headers()
-            elif parsed_path.path == "/logs":
-                self.send_logs()
+        if parsed_path.path == "/favicon.ico":
+            log_request(parsed_path.path, self.command, log_only_in_cli=True, client_address=client_address)
+            self.send_response(404)
+            self.end_headers()
+        elif parsed_path.path == "/logs":
+            self.send_logs()
         else:
-            self.handle_main(parsed_path, client_address)
+            self.handle_home(parsed_path, client_address)
 
     def do_POST(self):
         length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(length).decode('utf-8')
         parsed_path = urlparse(self.path)
         client_address = f"{self.client_address[0]}:{self.server.server_port}" if verbose else ""
-        self.handle_main(parsed_path, client_address, body)
+        self.handle_home(parsed_path, client_address, body)
 
-    def handle_main(self, parsed_path, client_address, body=None):
+    def handle_home(self, parsed_path, client_address, body=None):
         # Process parameters only if path is root (`/`)
         if parsed_path.path == "/":
             query_params = parse_qs(parsed_path.query)
@@ -140,14 +137,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             query_json = None
 
         # Log request based on route and verbose mode
-        event_log(parsed_path.path, self.command, query_value=query_value or None, body=body, client_address=client_address)
+        log_request(parsed_path.path, self.command, query_value=query_value or None, body=body, client_address=client_address)
 
         # Handle specific parameters if they are present and on the root path
         if query_json and (("q" in query_json or "req" in query_json) and ("p" in query_json or "rep" in query_json)):
             query = query_json.get("q", query_json.get("req", ""))
             target = query_json.get("p", query_json.get("rep", ""))
             if target:
-                response_text = forward_param(query, target)
+                response_text = send_request_to_target(query, target)
                 self.send_response(200)
                 self.send_header("Content-type", "text/plain")
                 self.end_headers()
@@ -161,32 +158,32 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(response.encode('utf-8') if query_value else b'')
 
     def send_logs(self):
-        html_content = logs_html()
+        html_content = generate_logs_html()
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
         self.wfile.write(html_content.encode('utf-8'))
 
-def run(ip, port):
+def run_server(ip, port):
     server = HTTPServer((ip, port), RequestHandler)
-    print(f"[-] Server running on {ip}:{port}")
+    print(f"Server running on {ip}:{port}")
     server_thread = threading.Thread(target=server.serve_forever)
     server_thread.start()
 
-    def shutdown(signum, frame):
-        print("\n[-] Shutting down the server")
+    def shutdown_server(signum, frame):
+        print("\nShutting down the server gracefully...")
         server.shutdown()
         server_thread.join()
         server.server_close()
-        # print("[-] Server shutdown completed")
+        print("Server shutdown completed.")
         sys.exit(0)
 
-    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGINT, shutdown_server)
     server_thread.join()
 
 def main():
     global verbose
-    parser = argparse.ArgumentParser(description="Receiver Web Server", usage="python main.py [options], use -h for help")
+    parser = argparse.ArgumentParser(description="Receiver Web Server")
     parser.add_argument("-i", "--ip", default="0.0.0.0", help="IP address to bind")
     parser.add_argument("-p", "--port", type=int, default=80, help="Port number to bind")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
@@ -195,7 +192,7 @@ def main():
 
     verbose = args.verbose
     configure_logging(verbose)
-    run(args.ip, args.port)
+    run_server(args.ip, args.port)
 
 if __name__ == "__main__":
     main()
